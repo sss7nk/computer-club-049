@@ -1,0 +1,4 @@
+import {state} from './state.js';
+// fetch uses same-origin HttpOnly sessions and CSRF protection.
+export async function request(path,{method='GET',body}={}){const headers={};if(body!==undefined)headers['content-type']='application/json';if(state.user?.csrf_token)headers['x-csrf-token']=state.user.csrf_token;const response=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin'});let data;try{data=await response.json();}catch{throw new Error('Сервер вернул непонятный ответ');}if(!response.ok){if(response.status===401&&state.user){state.user=null;location.hash='/login';}throw new Error(data.error||'Не удалось выполнить запрос');}return data;}
+export async function refresh(){const value=await request('/api/bootstrap');state.user=value.user;state.data=value.data;state.now=value.now;}

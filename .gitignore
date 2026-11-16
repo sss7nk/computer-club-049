@@ -1,0 +1,12 @@
+node_modules/
+dist/
+site.tar.gz
+.runtime/
+.env
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+test-results/
+playwright-report/
+.openai/.local/
