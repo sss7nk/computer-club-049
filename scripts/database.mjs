@@ -3,7 +3,7 @@ import {backup} from 'node:sqlite';
 import {existsSync,mkdirSync,renameSync,copyFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
-const root=fileURLToPath(new URL('..',import.meta.url)),folder=path.join(root,'.runtime'),current=path.join(folder,'club.sqlite'),[command,provided]=process.argv.slice(2);
+const root=fileURLToPath(new URL('..',import.meta.url)),folder=path.resolve(process.env.CLUB_RUNTIME_DIR||process.env.DATA_DIR||path.join(root,'.runtime')),current=process.env.CLUB_DATABASE||path.join(folder,'club.sqlite'),[command,provided]=process.argv.slice(2);
 if(!existsSync(current))throw new Error('Сначала запустите приложение: npm start');
 if(command==='check'){const db=openDatabase(current);try{if(db.raw.prepare('PRAGMA integrity_check').get().integrity_check!=='ok')throw new Error('Повреждение SQLite');if(db.raw.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Нарушены внешние ключи');console.log('DATABASE_OK');}finally{db.close();}}
 else if(command==='backup'){const destination=provided?path.resolve(provided):path.join(folder,'backups','club-'+Date.now()+'.sqlite');mkdirSync(path.dirname(destination),{recursive:true});if(existsSync(destination))throw new Error('Файл копии уже существует');const db=openDatabase(current);try{await backup(db.raw,destination);console.log('BACKUP_OK',destination);}finally{db.close();}}
