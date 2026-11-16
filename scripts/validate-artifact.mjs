@@ -5,10 +5,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workerPath = resolve(projectRoot, "dist/server/index.js");
-const manifestPath = resolve(projectRoot, "dist/.openai/hosting.json");
 
 const source = await readFile(workerPath, "utf8");
-try { JSON.parse(await readFile(manifestPath, "utf8")); } catch (e) { if(e.code !== 'ENOENT')throw e; }
 
 // A data URL forces ESM parsing even though the generated output has no package.json.
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;

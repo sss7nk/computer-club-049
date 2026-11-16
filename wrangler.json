@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "computer-club-049",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-11-16",
+  "workers_dev": true,
+  "preview_urls": false,
+  "send_metrics": false,
+  "build": {
+    "command": "node scripts/build.mjs"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "computer-club-049-db",
+      "database_id": "27174092-6f29-4098-a683-e1251775b9ce",
+      "migrations_dir": "drizzle"
+    }
+  ]
+}

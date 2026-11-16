@@ -9,4 +9,6 @@ site.tar.gz
 *.db
 test-results/
 playwright-report/
-.openai/.local/
+.wrangler/
+.dev.vars
+.dev.vars.*
