@@ -1,0 +1,278 @@
+PRAGMA defer_foreign_keys=ON;
+
+DROP TRIGGER IF EXISTS booking_insert;
+
+DROP TRIGGER IF EXISTS session_insert;
+
+DROP TRIGGER IF EXISTS payment_insert;
+
+DROP TRIGGER IF EXISTS log_insert;
+
+DROP TRIGGER IF EXISTS booking_update;
+
+DROP TRIGGER IF EXISTS session_update;
+
+DROP TRIGGER IF EXISTS payment_update;
+
+DROP TRIGGER IF EXISTS log_update;
+
+DROP TRIGGER IF EXISTS tariff_history;
+
+DROP TRIGGER IF EXISTS fault_lifecycle;
+
+DROP TRIGGER IF EXISTS place_available;
+
+DROP TRIGGER IF EXISTS fault_open;
+
+DROP TRIGGER IF EXISTS fault_resolved;
+
+DROP TRIGGER IF EXISTS keep_bookings;
+
+DROP TRIGGER IF EXISTS keep_sessions;
+
+DROP TRIGGER IF EXISTS keep_payments;
+
+DROP TRIGGER IF EXISTS keep_faults;
+
+DROP TRIGGER IF EXISTS keep_action_log;
+
+DROP TRIGGER IF EXISTS log_immutable;
+
+DROP VIEW IF EXISTS v_revenue;
+
+DROP VIEW IF EXISTS v_unpaid_sessions;
+
+DROP VIEW IF EXISTS v_booking_journal;
+
+CREATE TABLE client_accounts (
+ id INTEGER PRIMARY KEY CHECK(id>0),
+ client_id INTEGER NOT NULL UNIQUE REFERENCES clients(id) ON DELETE RESTRICT,
+ login TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(login) BETWEEN 3 AND 32),
+ password_hash TEXT NOT NULL CHECK(length(password_hash)>60),
+ active INTEGER NOT NULL CHECK(active IN (0,1)),
+ created_at TEXT NOT NULL CHECK(julianday(created_at) IS NOT NULL)
+);
+
+CREATE TABLE bookings_client_migration (
+  id INTEGER PRIMARY KEY NOT NULL CHECK (id IS NULL OR (typeof(id)='integer' AND id>0)),
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (client_id IS NULL OR (typeof(client_id)='integer' AND client_id>0)),
+  workplace_id INTEGER NOT NULL REFERENCES workplaces(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (workplace_id IS NULL OR (typeof(workplace_id)='integer' AND workplace_id>0)),
+  tariff_id INTEGER NOT NULL REFERENCES tariffs(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (tariff_id IS NULL OR (typeof(tariff_id)='integer' AND tariff_id>0)),
+  starts_at TEXT NOT NULL CHECK (starts_at IS NULL OR (typeof(starts_at)='text' AND substr(starts_at,11,1)='T' AND julianday(starts_at) IS NOT NULL AND substr(starts_at,-6)='+03:00' AND (length(starts_at)=25 OR (length(starts_at) BETWEEN 27 AND 32 AND substr(starts_at,20,1)='.' AND substr(starts_at,21,length(starts_at)-26) NOT GLOB '*[^0-9]*')))),
+  ends_at TEXT NOT NULL CHECK (ends_at IS NULL OR (typeof(ends_at)='text' AND substr(ends_at,11,1)='T' AND julianday(ends_at) IS NOT NULL AND substr(ends_at,-6)='+03:00' AND (length(ends_at)=25 OR (length(ends_at) BETWEEN 27 AND 32 AND substr(ends_at,20,1)='.' AND substr(ends_at,21,length(ends_at)-26) NOT GLOB '*[^0-9]*')))),
+  status TEXT NOT NULL CHECK (status IS NULL OR (typeof(status)='text' AND length(trim(status))>0 AND status IN ('confirmed','completed','cancelled','no_show'))),
+  needs_resolution INTEGER NOT NULL CHECK (needs_resolution IS NULL OR (typeof(needs_resolution)='integer' AND needs_resolution IN (0,1))),
+  fault_id INTEGER REFERENCES faults(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (fault_id IS NULL OR (typeof(fault_id)='integer' AND fault_id>0)),
+  cancel_reason TEXT CHECK (cancel_reason IS NULL OR (typeof(cancel_reason)='text' AND length(trim(cancel_reason))>0)),
+  changed_at TEXT NOT NULL CHECK (changed_at IS NULL OR (typeof(changed_at)='text' AND substr(changed_at,11,1)='T' AND julianday(changed_at) IS NOT NULL AND substr(changed_at,-6)='+03:00' AND (length(changed_at)=25 OR (length(changed_at) BETWEEN 27 AND 32 AND substr(changed_at,20,1)='.' AND substr(changed_at,21,length(changed_at)-26) NOT GLOB '*[^0-9]*')))),
+  changed_by INTEGER REFERENCES staff(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (changed_by IS NULL OR (typeof(changed_by)='integer' AND changed_by>0)),
+  CHECK ((CAST(strftime('%s',substr(ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(ends_at,20,1)='.' THEN CAST(substr(substr(ends_at,21,length(ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>(CAST(strftime('%s',substr(starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(starts_at,20,1)='.' THEN CAST(substr(substr(starts_at,21,length(starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)),
+  CHECK (status!='cancelled' OR length(trim(coalesce(cancel_reason,'')))>0),
+  CHECK (needs_resolution=0 OR (status='confirmed' AND fault_id IS NOT NULL))
+);
+
+CREATE TABLE action_log_client_migration (
+  id INTEGER PRIMARY KEY NOT NULL CHECK (id IS NULL OR (typeof(id)='integer' AND id>0)),
+  entity_type TEXT NOT NULL CHECK (entity_type IS NULL OR (typeof(entity_type)='text' AND length(trim(entity_type))>0)),
+  entity_id INTEGER NOT NULL CHECK (entity_id IS NULL OR (typeof(entity_id)='integer' AND entity_id>0)),
+  action TEXT NOT NULL CHECK (action IS NULL OR (typeof(action)='text' AND length(trim(action))>0)),
+  old_values TEXT NOT NULL CHECK (old_values IS NULL OR (CASE WHEN json_valid(old_values) THEN json_type(old_values)='object' ELSE 0 END)),
+  new_values TEXT NOT NULL CHECK (new_values IS NULL OR (CASE WHEN json_valid(new_values) THEN json_type(new_values)='object' ELSE 0 END)),
+  reason TEXT CHECK (reason IS NULL OR (typeof(reason)='text' AND length(trim(reason))>0)),
+  occurred_at TEXT NOT NULL CHECK (occurred_at IS NULL OR (typeof(occurred_at)='text' AND substr(occurred_at,11,1)='T' AND julianday(occurred_at) IS NOT NULL AND substr(occurred_at,-6)='+03:00' AND (length(occurred_at)=25 OR (length(occurred_at) BETWEEN 27 AND 32 AND substr(occurred_at,20,1)='.' AND substr(occurred_at,21,length(occurred_at)-26) NOT GLOB '*[^0-9]*')))),
+  staff_id INTEGER REFERENCES staff(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (staff_id IS NULL OR (typeof(staff_id)='integer' AND staff_id>0)),
+  client_id INTEGER REFERENCES clients(id) ON DELETE RESTRICT,
+  CHECK ((staff_id IS NOT NULL AND client_id IS NULL) OR (staff_id IS NULL AND client_id IS NOT NULL))
+);
+
+INSERT INTO bookings_client_migration (id,client_id,workplace_id,tariff_id,starts_at,ends_at,status,needs_resolution,fault_id,cancel_reason,changed_at,changed_by) SELECT id,client_id,workplace_id,tariff_id,starts_at,ends_at,status,needs_resolution,fault_id,cancel_reason,changed_at,changed_by FROM bookings;
+
+INSERT INTO action_log_client_migration (id,entity_type,entity_id,action,old_values,new_values,reason,occurred_at,staff_id) SELECT id,entity_type,entity_id,action,old_values,new_values,reason,occurred_at,staff_id FROM action_log;
+
+DROP TABLE action_log;
+
+DROP TABLE bookings;
+
+ALTER TABLE bookings_client_migration RENAME TO bookings;
+
+ALTER TABLE action_log_client_migration RENAME TO action_log;
+
+CREATE INDEX IF NOT EXISTS ix_staff_roles_staff_id ON staff_roles(staff_id);
+
+CREATE INDEX IF NOT EXISTS ix_staff_roles_role_id ON staff_roles(role_id);
+
+CREATE INDEX IF NOT EXISTS ix_workplaces_zone_id ON workplaces(zone_id);
+
+CREATE INDEX IF NOT EXISTS ix_workplaces_category_id ON workplaces(category_id);
+
+CREATE INDEX IF NOT EXISTS ix_tariffs_category_id ON tariffs(category_id);
+
+CREATE INDEX IF NOT EXISTS ix_bookings_client_id ON bookings(client_id);
+
+CREATE INDEX IF NOT EXISTS ix_bookings_workplace_id ON bookings(workplace_id);
+
+CREATE INDEX IF NOT EXISTS ix_bookings_tariff_id ON bookings(tariff_id);
+
+CREATE INDEX IF NOT EXISTS ix_bookings_fault_id ON bookings(fault_id);
+
+CREATE INDEX IF NOT EXISTS ix_bookings_changed_by ON bookings(changed_by);
+
+CREATE INDEX IF NOT EXISTS ix_sessions_client_id ON sessions(client_id);
+
+CREATE INDEX IF NOT EXISTS ix_sessions_workplace_id ON sessions(workplace_id);
+
+CREATE INDEX IF NOT EXISTS ix_sessions_tariff_id ON sessions(tariff_id);
+
+CREATE INDEX IF NOT EXISTS ix_payments_method_id ON payments(method_id);
+
+CREATE INDEX IF NOT EXISTS ix_payments_staff_id ON payments(staff_id);
+
+CREATE INDEX IF NOT EXISTS ix_faults_workplace_id ON faults(workplace_id);
+
+CREATE INDEX IF NOT EXISTS ix_faults_detected_by ON faults(detected_by);
+
+CREATE INDEX IF NOT EXISTS ix_faults_resolved_by ON faults(resolved_by);
+
+CREATE INDEX IF NOT EXISTS ix_action_log_staff_id ON action_log(staff_id);
+
+CREATE INDEX IF NOT EXISTS ix_bookings_interval ON bookings(workplace_id,status,starts_at,ends_at);
+
+CREATE INDEX IF NOT EXISTS ix_sessions_interval ON sessions(workplace_id,started_at,planned_ends_at);
+
+CREATE INDEX IF NOT EXISTS ix_payments_time ON payments(paid_at);
+
+CREATE INDEX IF NOT EXISTS ix_faults_interval ON faults(workplace_id,detected_at,resolved_at);
+
+CREATE TRIGGER booking_insert BEFORE INSERT ON bookings BEGIN
+ SELECT RAISE(ABORT,'Бронь: неисправность другого места') WHERE NEW.needs_resolution=1 AND NOT EXISTS(SELECT 1 FROM faults f WHERE f.id=NEW.fault_id AND f.workplace_id=NEW.workplace_id);
+ SELECT RAISE(ABORT,'Бронь: тариф другой категории') WHERE (SELECT category_id FROM workplaces WHERE id=NEW.workplace_id)!=(SELECT category_id FROM tariffs WHERE id=NEW.tariff_id);
+ SELECT RAISE(ABORT,'Тариф не действует на начало брони') WHERE NEW.status='confirmed' AND NOT EXISTS(SELECT 1 FROM sessions WHERE booking_id=NEW.id) AND EXISTS(SELECT 1 FROM tariffs t WHERE t.id=NEW.tariff_id AND ((CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(t.valid_from,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_from,20,1)='.' THEN CAST(substr(substr(t.valid_from,21,length(t.valid_from)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) OR (t.valid_to IS NOT NULL AND (CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=(CAST(strftime('%s',substr(t.valid_to,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_to,20,1)='.' THEN CAST(substr(substr(t.valid_to,21,length(t.valid_to)-26)||'000000',1,6) AS INTEGER) ELSE 0 END))));
+ SELECT RAISE(ABORT,'Для брони неисправного места нужно решение по поломке') WHERE NEW.status='confirmed' AND NEW.needs_resolution=0 AND (SELECT condition FROM workplaces WHERE id=NEW.workplace_id)!='available' AND NOT EXISTS(SELECT 1 FROM sessions WHERE booking_id=NEW.id);
+ SELECT RAISE(ABORT,'Пересечение подтверждённых броней') WHERE NEW.status='confirmed' AND EXISTS(SELECT 1 FROM bookings b WHERE b.id!=NEW.id AND b.workplace_id=NEW.workplace_id AND b.status='confirmed' AND (CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(b.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.ends_at,20,1)='.' THEN CAST(substr(substr(b.ends_at,21,length(b.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(b.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.starts_at,20,1)='.' THEN CAST(substr(substr(b.starts_at,21,length(b.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ends_at,20,1)='.' THEN CAST(substr(substr(NEW.ends_at,21,length(NEW.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Бронь пересекает активный сеанс') WHERE NEW.status='confirmed' AND EXISTS(SELECT 1 FROM sessions s WHERE s.status='active' AND s.workplace_id=NEW.workplace_id AND (s.booking_id IS NULL OR s.booking_id!=NEW.id) AND (CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(s.planned_ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.planned_ends_at,20,1)='.' THEN CAST(substr(substr(s.planned_ends_at,21,length(s.planned_ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(s.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.started_at,20,1)='.' THEN CAST(substr(substr(s.started_at,21,length(s.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ends_at,20,1)='.' THEN CAST(substr(substr(NEW.ends_at,21,length(NEW.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Слишком ранняя неявка') WHERE NEW.status='no_show' AND (CAST(strftime('%s',substr(NEW.changed_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.changed_at,20,1)='.' THEN CAST(substr(substr(NEW.changed_at,21,length(NEW.changed_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) < min((CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)+900000000,(CAST(strftime('%s',substr(NEW.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ends_at,20,1)='.' THEN CAST(substr(substr(NEW.ends_at,21,length(NEW.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Начатую бронь нельзя отменить или считать неявкой') WHERE NEW.status IN('no_show','cancelled') AND EXISTS(SELECT 1 FROM sessions WHERE booking_id=NEW.id);
+END;
+
+CREATE TRIGGER session_insert BEFORE INSERT ON sessions BEGIN
+ SELECT RAISE(ABORT,'Сеанс: ставка или категория не соответствует версии тарифа') WHERE NOT EXISTS(SELECT 1 FROM tariffs t JOIN workplaces w ON w.id=NEW.workplace_id WHERE t.id=NEW.tariff_id AND t.category_id=w.category_id AND t.hourly_rate=NEW.hourly_rate_snapshot);
+ SELECT RAISE(ABORT,'Тариф не действовал при запуске') WHERE EXISTS(SELECT 1 FROM tariffs t WHERE t.id=NEW.tariff_id AND ((CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(t.valid_from,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_from,20,1)='.' THEN CAST(substr(substr(t.valid_from,21,length(t.valid_from)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) OR (t.valid_to IS NOT NULL AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=(CAST(strftime('%s',substr(t.valid_to,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_to,20,1)='.' THEN CAST(substr(substr(t.valid_to,21,length(t.valid_to)-26)||'000000',1,6) AS INTEGER) ELSE 0 END))));
+ SELECT RAISE(ABORT,'Сеанс не соответствует брони') WHERE NEW.booking_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM bookings b WHERE b.id=NEW.booking_id AND b.client_id=NEW.client_id AND b.workplace_id=NEW.workplace_id AND b.tariff_id=NEW.tariff_id AND b.needs_resolution=0 AND ((NEW.status='active' AND b.status='confirmed') OR (NEW.status='completed' AND b.status IN('confirmed','completed'))));
+ SELECT RAISE(ABORT,'Срок ожидания брони истёк') WHERE NEW.booking_id IS NOT NULL AND EXISTS(SELECT 1 FROM bookings b WHERE b.id=NEW.booking_id AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=min((CAST(strftime('%s',substr(b.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.starts_at,20,1)='.' THEN CAST(substr(substr(b.starts_at,21,length(b.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)+900000000,(CAST(strftime('%s',substr(b.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.ends_at,20,1)='.' THEN CAST(substr(substr(b.ends_at,21,length(b.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)));
+ SELECT RAISE(ABORT,'Пересечение сеансов места или клиента') WHERE EXISTS(SELECT 1 FROM sessions s WHERE s.id!=NEW.id AND (s.workplace_id=NEW.workplace_id OR s.client_id=NEW.client_id) AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(coalesce(s.ended_at,s.planned_ends_at),1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(coalesce(s.ended_at,s.planned_ends_at),20,1)='.' THEN CAST(substr(substr(coalesce(s.ended_at,s.planned_ends_at),21,length(coalesce(s.ended_at,s.planned_ends_at))-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(s.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.started_at,20,1)='.' THEN CAST(substr(substr(s.started_at,21,length(s.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(coalesce(NEW.ended_at,NEW.planned_ends_at),1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(coalesce(NEW.ended_at,NEW.planned_ends_at),20,1)='.' THEN CAST(substr(substr(coalesce(NEW.ended_at,NEW.planned_ends_at),21,length(coalesce(NEW.ended_at,NEW.planned_ends_at))-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Сеанс пересекает чужую бронь') WHERE NEW.status='active' AND EXISTS(SELECT 1 FROM bookings b WHERE b.workplace_id=NEW.workplace_id AND b.status='confirmed' AND (NEW.booking_id IS NULL OR b.id!=NEW.booking_id) AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(b.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.ends_at,20,1)='.' THEN CAST(substr(substr(b.ends_at,21,length(b.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(b.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.starts_at,20,1)='.' THEN CAST(substr(substr(b.starts_at,21,length(b.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.planned_ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.planned_ends_at,20,1)='.' THEN CAST(substr(substr(NEW.planned_ends_at,21,length(NEW.planned_ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Нельзя запускать сеанс в период неисправности') WHERE EXISTS(SELECT 1 FROM faults f WHERE f.workplace_id=NEW.workplace_id AND (CAST(strftime('%s',substr(f.detected_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.detected_at,20,1)='.' THEN CAST(substr(substr(f.detected_at,21,length(f.detected_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<=(CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (f.resolved_at IS NULL OR (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(f.resolved_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.resolved_at,20,1)='.' THEN CAST(substr(substr(f.resolved_at,21,length(f.resolved_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)));
+ SELECT RAISE(ABORT,'Нельзя начислять время после поломки') WHERE NEW.ended_at IS NOT NULL AND EXISTS(SELECT 1 FROM faults f WHERE f.workplace_id=NEW.workplace_id AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(f.detected_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.detected_at,20,1)='.' THEN CAST(substr(substr(f.detected_at,21,length(f.detected_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(f.detected_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.detected_at,20,1)='.' THEN CAST(substr(substr(f.detected_at,21,length(f.detected_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.ended_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ended_at,20,1)='.' THEN CAST(substr(substr(NEW.ended_at,21,length(NEW.ended_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Место на обслуживании') WHERE NEW.status='active' AND (SELECT condition FROM workplaces WHERE id=NEW.workplace_id)!='available';
+END;
+
+CREATE TRIGGER payment_insert BEFORE INSERT ON payments BEGIN
+ SELECT RAISE(ABORT,'Нужна полная оплата завершённого сеанса') WHERE NOT EXISTS(SELECT 1 FROM sessions s WHERE s.id=NEW.session_id AND s.status='completed' AND s.total_amount=NEW.amount AND (CAST(strftime('%s',substr(NEW.paid_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.paid_at,20,1)='.' THEN CAST(substr(substr(NEW.paid_at,21,length(NEW.paid_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=(CAST(strftime('%s',substr(s.ended_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.ended_at,20,1)='.' THEN CAST(substr(substr(s.ended_at,21,length(s.ended_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+END;
+
+CREATE TRIGGER log_insert BEFORE INSERT ON action_log BEGIN
+ SELECT RAISE(ABORT,'Не найден объект журнала') WHERE NOT ((NEW.entity_type='roles' AND EXISTS(SELECT 1 FROM roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff' AND EXISTS(SELECT 1 FROM staff WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff_roles' AND EXISTS(SELECT 1 FROM staff_roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='clients' AND EXISTS(SELECT 1 FROM clients WHERE id=NEW.entity_id)) OR (NEW.entity_type='zones' AND EXISTS(SELECT 1 FROM zones WHERE id=NEW.entity_id)) OR (NEW.entity_type='categories' AND EXISTS(SELECT 1 FROM categories WHERE id=NEW.entity_id)) OR (NEW.entity_type='workplaces' AND EXISTS(SELECT 1 FROM workplaces WHERE id=NEW.entity_id)) OR (NEW.entity_type='tariffs' AND EXISTS(SELECT 1 FROM tariffs WHERE id=NEW.entity_id)) OR (NEW.entity_type='bookings' AND EXISTS(SELECT 1 FROM bookings WHERE id=NEW.entity_id)) OR (NEW.entity_type='sessions' AND EXISTS(SELECT 1 FROM sessions WHERE id=NEW.entity_id)) OR (NEW.entity_type='payment_methods' AND EXISTS(SELECT 1 FROM payment_methods WHERE id=NEW.entity_id)) OR (NEW.entity_type='payments' AND EXISTS(SELECT 1 FROM payments WHERE id=NEW.entity_id)) OR (NEW.entity_type='faults' AND EXISTS(SELECT 1 FROM faults WHERE id=NEW.entity_id)) OR (NEW.entity_type='client_accounts' AND EXISTS(SELECT 1 FROM client_accounts WHERE id=NEW.entity_id)) OR (NEW.entity_type='action_log' AND EXISTS(SELECT 1 FROM action_log WHERE id=NEW.entity_id)));
+ SELECT RAISE(ABORT,'Перенос требует причины и прежних/новых значений') WHERE NEW.action='move' AND (length(trim(coalesce(NEW.reason,'')))=0 OR NEW.old_values='{}' OR NEW.new_values='{}' OR NEW.entity_type!='bookings');
+END;
+
+CREATE TRIGGER booking_update BEFORE UPDATE ON bookings BEGIN
+ SELECT RAISE(ABORT,'Бронь: неисправность другого места') WHERE NEW.needs_resolution=1 AND NOT EXISTS(SELECT 1 FROM faults f WHERE f.id=NEW.fault_id AND f.workplace_id=NEW.workplace_id);
+ SELECT RAISE(ABORT,'Бронь: тариф другой категории') WHERE (SELECT category_id FROM workplaces WHERE id=NEW.workplace_id)!=(SELECT category_id FROM tariffs WHERE id=NEW.tariff_id);
+ SELECT RAISE(ABORT,'Тариф не действует на начало брони') WHERE NEW.status='confirmed' AND NOT EXISTS(SELECT 1 FROM sessions WHERE booking_id=NEW.id) AND EXISTS(SELECT 1 FROM tariffs t WHERE t.id=NEW.tariff_id AND ((CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(t.valid_from,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_from,20,1)='.' THEN CAST(substr(substr(t.valid_from,21,length(t.valid_from)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) OR (t.valid_to IS NOT NULL AND (CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=(CAST(strftime('%s',substr(t.valid_to,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_to,20,1)='.' THEN CAST(substr(substr(t.valid_to,21,length(t.valid_to)-26)||'000000',1,6) AS INTEGER) ELSE 0 END))));
+ SELECT RAISE(ABORT,'Для брони неисправного места нужно решение по поломке') WHERE NEW.status='confirmed' AND NEW.needs_resolution=0 AND (SELECT condition FROM workplaces WHERE id=NEW.workplace_id)!='available' AND NOT EXISTS(SELECT 1 FROM sessions WHERE booking_id=NEW.id);
+ SELECT RAISE(ABORT,'Пересечение подтверждённых броней') WHERE NEW.status='confirmed' AND EXISTS(SELECT 1 FROM bookings b WHERE b.id!=NEW.id AND b.workplace_id=NEW.workplace_id AND b.status='confirmed' AND (CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(b.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.ends_at,20,1)='.' THEN CAST(substr(substr(b.ends_at,21,length(b.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(b.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.starts_at,20,1)='.' THEN CAST(substr(substr(b.starts_at,21,length(b.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ends_at,20,1)='.' THEN CAST(substr(substr(NEW.ends_at,21,length(NEW.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Бронь пересекает активный сеанс') WHERE NEW.status='confirmed' AND EXISTS(SELECT 1 FROM sessions s WHERE s.status='active' AND s.workplace_id=NEW.workplace_id AND (s.booking_id IS NULL OR s.booking_id!=NEW.id) AND (CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(s.planned_ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.planned_ends_at,20,1)='.' THEN CAST(substr(substr(s.planned_ends_at,21,length(s.planned_ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(s.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.started_at,20,1)='.' THEN CAST(substr(substr(s.started_at,21,length(s.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ends_at,20,1)='.' THEN CAST(substr(substr(NEW.ends_at,21,length(NEW.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Слишком ранняя неявка') WHERE NEW.status='no_show' AND (CAST(strftime('%s',substr(NEW.changed_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.changed_at,20,1)='.' THEN CAST(substr(substr(NEW.changed_at,21,length(NEW.changed_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) < min((CAST(strftime('%s',substr(NEW.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.starts_at,20,1)='.' THEN CAST(substr(substr(NEW.starts_at,21,length(NEW.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)+900000000,(CAST(strftime('%s',substr(NEW.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ends_at,20,1)='.' THEN CAST(substr(substr(NEW.ends_at,21,length(NEW.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Начатую бронь нельзя отменить или считать неявкой') WHERE NEW.status IN('no_show','cancelled') AND EXISTS(SELECT 1 FROM sessions WHERE booking_id=NEW.id);
+ SELECT RAISE(ABORT,'Конечный статус брони необратим') WHERE OLD.status!='confirmed' AND (NEW.status!=OLD.status OR NEW.client_id!=OLD.client_id OR NEW.workplace_id!=OLD.workplace_id OR NEW.tariff_id!=OLD.tariff_id OR NEW.starts_at!=OLD.starts_at OR NEW.ends_at!=OLD.ends_at);
+ SELECT RAISE(ABORT,'Начатую бронь нельзя переносить') WHERE EXISTS(SELECT 1 FROM sessions WHERE booking_id=OLD.id) AND (NEW.client_id!=OLD.client_id OR NEW.workplace_id!=OLD.workplace_id OR NEW.tariff_id!=OLD.tariff_id OR NEW.starts_at!=OLD.starts_at OR NEW.ends_at!=OLD.ends_at OR NEW.needs_resolution=1);
+ SELECT RAISE(ABORT,'Сначала завершите связанный сеанс') WHERE NEW.status='completed' AND NOT EXISTS(SELECT 1 FROM sessions WHERE booking_id=NEW.id AND status='completed');
+END;
+
+CREATE TRIGGER session_update BEFORE UPDATE ON sessions BEGIN
+ SELECT RAISE(ABORT,'Сеанс: ставка или категория не соответствует версии тарифа') WHERE NOT EXISTS(SELECT 1 FROM tariffs t JOIN workplaces w ON w.id=NEW.workplace_id WHERE t.id=NEW.tariff_id AND t.category_id=w.category_id AND t.hourly_rate=NEW.hourly_rate_snapshot);
+ SELECT RAISE(ABORT,'Тариф не действовал при запуске') WHERE EXISTS(SELECT 1 FROM tariffs t WHERE t.id=NEW.tariff_id AND ((CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(t.valid_from,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_from,20,1)='.' THEN CAST(substr(substr(t.valid_from,21,length(t.valid_from)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) OR (t.valid_to IS NOT NULL AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=(CAST(strftime('%s',substr(t.valid_to,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(t.valid_to,20,1)='.' THEN CAST(substr(substr(t.valid_to,21,length(t.valid_to)-26)||'000000',1,6) AS INTEGER) ELSE 0 END))));
+ SELECT RAISE(ABORT,'Сеанс не соответствует брони') WHERE NEW.booking_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM bookings b WHERE b.id=NEW.booking_id AND b.client_id=NEW.client_id AND b.workplace_id=NEW.workplace_id AND b.tariff_id=NEW.tariff_id AND b.needs_resolution=0 AND ((NEW.status='active' AND b.status='confirmed') OR (NEW.status='completed' AND b.status IN('confirmed','completed'))));
+ SELECT RAISE(ABORT,'Срок ожидания брони истёк') WHERE NEW.booking_id IS NOT NULL AND EXISTS(SELECT 1 FROM bookings b WHERE b.id=NEW.booking_id AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=min((CAST(strftime('%s',substr(b.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.starts_at,20,1)='.' THEN CAST(substr(substr(b.starts_at,21,length(b.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)+900000000,(CAST(strftime('%s',substr(b.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.ends_at,20,1)='.' THEN CAST(substr(substr(b.ends_at,21,length(b.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)));
+ SELECT RAISE(ABORT,'Пересечение сеансов места или клиента') WHERE EXISTS(SELECT 1 FROM sessions s WHERE s.id!=NEW.id AND (s.workplace_id=NEW.workplace_id OR s.client_id=NEW.client_id) AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(coalesce(s.ended_at,s.planned_ends_at),1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(coalesce(s.ended_at,s.planned_ends_at),20,1)='.' THEN CAST(substr(substr(coalesce(s.ended_at,s.planned_ends_at),21,length(coalesce(s.ended_at,s.planned_ends_at))-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(s.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.started_at,20,1)='.' THEN CAST(substr(substr(s.started_at,21,length(s.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(coalesce(NEW.ended_at,NEW.planned_ends_at),1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(coalesce(NEW.ended_at,NEW.planned_ends_at),20,1)='.' THEN CAST(substr(substr(coalesce(NEW.ended_at,NEW.planned_ends_at),21,length(coalesce(NEW.ended_at,NEW.planned_ends_at))-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Сеанс пересекает чужую бронь') WHERE NEW.status='active' AND EXISTS(SELECT 1 FROM bookings b WHERE b.workplace_id=NEW.workplace_id AND b.status='confirmed' AND (NEW.booking_id IS NULL OR b.id!=NEW.booking_id) AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(b.ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.ends_at,20,1)='.' THEN CAST(substr(substr(b.ends_at,21,length(b.ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(b.starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(b.starts_at,20,1)='.' THEN CAST(substr(substr(b.starts_at,21,length(b.starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.planned_ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.planned_ends_at,20,1)='.' THEN CAST(substr(substr(NEW.planned_ends_at,21,length(NEW.planned_ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Нельзя запускать сеанс в период неисправности') WHERE EXISTS(SELECT 1 FROM faults f WHERE f.workplace_id=NEW.workplace_id AND (CAST(strftime('%s',substr(f.detected_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.detected_at,20,1)='.' THEN CAST(substr(substr(f.detected_at,21,length(f.detected_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<=(CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (f.resolved_at IS NULL OR (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(f.resolved_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.resolved_at,20,1)='.' THEN CAST(substr(substr(f.resolved_at,21,length(f.resolved_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)));
+ SELECT RAISE(ABORT,'Нельзя начислять время после поломки') WHERE NEW.ended_at IS NOT NULL AND EXISTS(SELECT 1 FROM faults f WHERE f.workplace_id=NEW.workplace_id AND (CAST(strftime('%s',substr(NEW.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.started_at,20,1)='.' THEN CAST(substr(substr(NEW.started_at,21,length(NEW.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(f.detected_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.detected_at,20,1)='.' THEN CAST(substr(substr(f.detected_at,21,length(f.detected_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND (CAST(strftime('%s',substr(f.detected_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(f.detected_at,20,1)='.' THEN CAST(substr(substr(f.detected_at,21,length(f.detected_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)<(CAST(strftime('%s',substr(NEW.ended_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.ended_at,20,1)='.' THEN CAST(substr(substr(NEW.ended_at,21,length(NEW.ended_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+ SELECT RAISE(ABORT,'Завершённый сеанс неизменяем') WHERE OLD.status='completed' AND (NEW.status!=OLD.status OR NEW.booking_id IS NOT OLD.booking_id OR NEW.client_id!=OLD.client_id OR NEW.workplace_id!=OLD.workplace_id OR NEW.tariff_id!=OLD.tariff_id OR NEW.hourly_rate_snapshot!=OLD.hourly_rate_snapshot OR NEW.started_at!=OLD.started_at OR NEW.ended_at IS NOT OLD.ended_at OR NEW.total_amount IS NOT OLD.total_amount OR NEW.end_reason IS NOT OLD.end_reason);
+ SELECT RAISE(ABORT,'Активный сеанс нельзя переносить или менять его ставку') WHERE OLD.status='active' AND (NEW.booking_id IS NOT OLD.booking_id OR NEW.client_id!=OLD.client_id OR NEW.workplace_id!=OLD.workplace_id OR NEW.tariff_id!=OLD.tariff_id OR NEW.hourly_rate_snapshot!=OLD.hourly_rate_snapshot OR NEW.started_at!=OLD.started_at);
+ SELECT RAISE(ABORT,'Продление неисправного места запрещено') WHERE NEW.status='active' AND NEW.planned_ends_at!=OLD.planned_ends_at AND (SELECT condition FROM workplaces WHERE id=NEW.workplace_id)!='available';
+END;
+
+CREATE TRIGGER payment_update BEFORE UPDATE ON payments BEGIN
+ SELECT RAISE(ABORT,'Нужна полная оплата завершённого сеанса') WHERE NOT EXISTS(SELECT 1 FROM sessions s WHERE s.id=NEW.session_id AND s.status='completed' AND s.total_amount=NEW.amount AND (CAST(strftime('%s',substr(NEW.paid_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.paid_at,20,1)='.' THEN CAST(substr(substr(NEW.paid_at,21,length(NEW.paid_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=(CAST(strftime('%s',substr(s.ended_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.ended_at,20,1)='.' THEN CAST(substr(substr(s.ended_at,21,length(s.ended_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+END;
+
+CREATE TRIGGER log_update BEFORE UPDATE ON action_log BEGIN
+ SELECT RAISE(ABORT,'Не найден объект журнала') WHERE NOT ((NEW.entity_type='roles' AND EXISTS(SELECT 1 FROM roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff' AND EXISTS(SELECT 1 FROM staff WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff_roles' AND EXISTS(SELECT 1 FROM staff_roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='clients' AND EXISTS(SELECT 1 FROM clients WHERE id=NEW.entity_id)) OR (NEW.entity_type='zones' AND EXISTS(SELECT 1 FROM zones WHERE id=NEW.entity_id)) OR (NEW.entity_type='categories' AND EXISTS(SELECT 1 FROM categories WHERE id=NEW.entity_id)) OR (NEW.entity_type='workplaces' AND EXISTS(SELECT 1 FROM workplaces WHERE id=NEW.entity_id)) OR (NEW.entity_type='tariffs' AND EXISTS(SELECT 1 FROM tariffs WHERE id=NEW.entity_id)) OR (NEW.entity_type='bookings' AND EXISTS(SELECT 1 FROM bookings WHERE id=NEW.entity_id)) OR (NEW.entity_type='sessions' AND EXISTS(SELECT 1 FROM sessions WHERE id=NEW.entity_id)) OR (NEW.entity_type='payment_methods' AND EXISTS(SELECT 1 FROM payment_methods WHERE id=NEW.entity_id)) OR (NEW.entity_type='payments' AND EXISTS(SELECT 1 FROM payments WHERE id=NEW.entity_id)) OR (NEW.entity_type='faults' AND EXISTS(SELECT 1 FROM faults WHERE id=NEW.entity_id)) OR (NEW.entity_type='client_accounts' AND EXISTS(SELECT 1 FROM client_accounts WHERE id=NEW.entity_id)) OR (NEW.entity_type='action_log' AND EXISTS(SELECT 1 FROM action_log WHERE id=NEW.entity_id)));
+ SELECT RAISE(ABORT,'Перенос требует причины и прежних/новых значений') WHERE NEW.action='move' AND (length(trim(coalesce(NEW.reason,'')))=0 OR NEW.old_values='{}' OR NEW.new_values='{}' OR NEW.entity_type!='bookings');
+END;
+
+CREATE TRIGGER tariff_history BEFORE UPDATE ON tariffs BEGIN
+ SELECT RAISE(ABORT,'Использованная версия тарифа неизменяема') WHERE EXISTS(SELECT 1 FROM sessions WHERE tariff_id=OLD.id) AND (NEW.hourly_rate!=OLD.hourly_rate OR NEW.category_id!=OLD.category_id OR NEW.valid_from!=OLD.valid_from);
+ SELECT RAISE(ABORT,'Конец тарифа исключает исторический запуск') WHERE NEW.valid_to IS NOT NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.tariff_id=OLD.id AND (CAST(strftime('%s',substr(s.started_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(s.started_at,20,1)='.' THEN CAST(substr(substr(s.started_at,21,length(s.started_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>=(CAST(strftime('%s',substr(NEW.valid_to,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.valid_to,20,1)='.' THEN CAST(substr(substr(NEW.valid_to,21,length(NEW.valid_to)-26)||'000000',1,6) AS INTEGER) ELSE 0 END));
+END;
+
+CREATE TRIGGER fault_lifecycle BEFORE UPDATE ON faults BEGIN
+ SELECT RAISE(ABORT,'Закрытая неисправность не открывается заново') WHERE OLD.status='resolved' AND (NEW.status!='resolved' OR NEW.workplace_id!=OLD.workplace_id OR NEW.detected_at!=OLD.detected_at OR NEW.resolved_at IS NOT OLD.resolved_at);
+END;
+
+CREATE TRIGGER place_available BEFORE UPDATE ON workplaces BEGIN
+ SELECT RAISE(ABORT,'У места остаётся открытая неисправность') WHERE NEW.condition='available' AND EXISTS(SELECT 1 FROM faults WHERE workplace_id=NEW.id AND status='open');
+ SELECT RAISE(ABORT,'Место с историей не меняет категорию или зону') WHERE (NEW.category_id!=OLD.category_id OR NEW.zone_id!=OLD.zone_id) AND (EXISTS(SELECT 1 FROM sessions WHERE workplace_id=OLD.id) OR EXISTS(SELECT 1 FROM bookings WHERE workplace_id=OLD.id));
+END;
+
+CREATE TRIGGER fault_open AFTER INSERT ON faults WHEN NEW.status='open' BEGIN
+ UPDATE workplaces SET condition='maintenance' WHERE id=NEW.workplace_id;
+ UPDATE bookings SET needs_resolution=1,fault_id=NEW.id,changed_at=NEW.detected_at,changed_by=NEW.detected_by
+ WHERE workplace_id=NEW.workplace_id AND status='confirmed' AND (CAST(strftime('%s',substr(ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(ends_at,20,1)='.' THEN CAST(substr(substr(ends_at,21,length(ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>(CAST(strftime('%s',substr(NEW.detected_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(NEW.detected_at,20,1)='.' THEN CAST(substr(substr(NEW.detected_at,21,length(NEW.detected_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END) AND NOT EXISTS(SELECT 1 FROM sessions WHERE booking_id=bookings.id);
+END;
+
+CREATE TRIGGER fault_resolved AFTER UPDATE OF status ON faults WHEN NEW.status='resolved' BEGIN
+ UPDATE workplaces SET condition='available' WHERE id=NEW.workplace_id AND NOT EXISTS(SELECT 1 FROM faults WHERE workplace_id=NEW.workplace_id AND status='open');
+END;
+
+CREATE TRIGGER keep_bookings BEFORE DELETE ON bookings BEGIN
+ SELECT RAISE(ABORT,'История сохраняется; удаление запрещено') WHERE 1;
+END;
+
+CREATE TRIGGER keep_sessions BEFORE DELETE ON sessions BEGIN
+ SELECT RAISE(ABORT,'История сохраняется; удаление запрещено') WHERE 1;
+END;
+
+CREATE TRIGGER keep_payments BEFORE DELETE ON payments BEGIN
+ SELECT RAISE(ABORT,'История сохраняется; удаление запрещено') WHERE 1;
+END;
+
+CREATE TRIGGER keep_faults BEFORE DELETE ON faults BEGIN
+ SELECT RAISE(ABORT,'История сохраняется; удаление запрещено') WHERE 1;
+END;
+
+CREATE TRIGGER keep_action_log BEFORE DELETE ON action_log BEGIN
+ SELECT RAISE(ABORT,'История сохраняется; удаление запрещено') WHERE 1;
+END;
+
+CREATE TRIGGER log_immutable BEFORE UPDATE ON action_log BEGIN
+ SELECT RAISE(ABORT,'Журнал дополняется, существующие события не меняются') WHERE 1;
+END;
+
+CREATE VIEW v_revenue AS SELECT date(paid_at,'+3 hours') AS payment_day,method_id,count(*) AS payment_count,sum(CAST(replace(amount,'.','') AS INTEGER)) AS amount_kopecks FROM payments GROUP BY payment_day,method_id;
+
+CREATE VIEW v_unpaid_sessions AS SELECT s.* FROM sessions s LEFT JOIN payments p ON p.session_id=s.id WHERE s.status='completed' AND p.id IS NULL;
+
+CREATE VIEW v_booking_journal AS SELECT b.*,c.full_name AS client_name,w.number AS workplace_number,z.name AS zone_name,k.name AS category_name,t.name AS tariff_name,t.hourly_rate FROM bookings b JOIN clients c ON c.id=b.client_id JOIN workplaces w ON w.id=b.workplace_id JOIN zones z ON z.id=w.zone_id JOIN categories k ON k.id=w.category_id JOIN tariffs t ON t.id=b.tariff_id;
+
+CREATE TABLE app_client_sessions (
+ token_hash TEXT PRIMARY KEY,
+ account_id INTEGER NOT NULL REFERENCES client_accounts(id) ON DELETE RESTRICT,
+ csrf_token TEXT NOT NULL,
+ expires_at TEXT NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX ix_app_client_sessions_account ON app_client_sessions(account_id);
+
+PRAGMA defer_foreign_keys=OFF;

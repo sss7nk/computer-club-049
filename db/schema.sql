@@ -78,6 +78,15 @@ CREATE TABLE tariffs (
   CHECK (valid_to IS NULL OR (CAST(strftime('%s',substr(valid_to,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(valid_to,20,1)='.' THEN CAST(substr(substr(valid_to,21,length(valid_to)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>(CAST(strftime('%s',substr(valid_from,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(valid_from,20,1)='.' THEN CAST(substr(substr(valid_from,21,length(valid_from)-26)||'000000',1,6) AS INTEGER) ELSE 0 END))
 );
 
+CREATE TABLE client_accounts (
+ id INTEGER PRIMARY KEY CHECK(id>0),
+ client_id INTEGER NOT NULL UNIQUE REFERENCES clients(id) ON DELETE RESTRICT,
+ login TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(login) BETWEEN 3 AND 32),
+ password_hash TEXT NOT NULL CHECK(length(password_hash)>60),
+ active INTEGER NOT NULL CHECK(active IN (0,1)),
+ created_at TEXT NOT NULL CHECK(julianday(created_at) IS NOT NULL)
+);
+
 -- Бронирования
 CREATE TABLE bookings (
   id INTEGER PRIMARY KEY NOT NULL CHECK (id IS NULL OR (typeof(id)='integer' AND id>0)),
@@ -91,7 +100,7 @@ CREATE TABLE bookings (
   fault_id INTEGER REFERENCES faults(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (fault_id IS NULL OR (typeof(fault_id)='integer' AND fault_id>0)),
   cancel_reason TEXT CHECK (cancel_reason IS NULL OR (typeof(cancel_reason)='text' AND length(trim(cancel_reason))>0)),
   changed_at TEXT NOT NULL CHECK (changed_at IS NULL OR (typeof(changed_at)='text' AND substr(changed_at,11,1)='T' AND julianday(changed_at) IS NOT NULL AND substr(changed_at,-6)='+03:00' AND (length(changed_at)=25 OR (length(changed_at) BETWEEN 27 AND 32 AND substr(changed_at,20,1)='.' AND substr(changed_at,21,length(changed_at)-26) NOT GLOB '*[^0-9]*')))),
-  changed_by INTEGER NOT NULL REFERENCES staff(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (changed_by IS NULL OR (typeof(changed_by)='integer' AND changed_by>0)),
+  changed_by INTEGER REFERENCES staff(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (changed_by IS NULL OR (typeof(changed_by)='integer' AND changed_by>0)),
   CHECK ((CAST(strftime('%s',substr(ends_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(ends_at,20,1)='.' THEN CAST(substr(substr(ends_at,21,length(ends_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)>(CAST(strftime('%s',substr(starts_at,1,19)||'+03:00') AS INTEGER)*1000000 + CASE WHEN substr(starts_at,20,1)='.' THEN CAST(substr(substr(starts_at,21,length(starts_at)-26)||'000000',1,6) AS INTEGER) ELSE 0 END)),
   CHECK (status!='cancelled' OR length(trim(coalesce(cancel_reason,'')))>0),
   CHECK (needs_resolution=0 OR (status='confirmed' AND fault_id IS NOT NULL))
@@ -163,7 +172,9 @@ CREATE TABLE action_log (
   new_values TEXT NOT NULL CHECK (new_values IS NULL OR (CASE WHEN json_valid(new_values) THEN json_type(new_values)='object' ELSE 0 END)),
   reason TEXT CHECK (reason IS NULL OR (typeof(reason)='text' AND length(trim(reason))>0)),
   occurred_at TEXT NOT NULL CHECK (occurred_at IS NULL OR (typeof(occurred_at)='text' AND substr(occurred_at,11,1)='T' AND julianday(occurred_at) IS NOT NULL AND substr(occurred_at,-6)='+03:00' AND (length(occurred_at)=25 OR (length(occurred_at) BETWEEN 27 AND 32 AND substr(occurred_at,20,1)='.' AND substr(occurred_at,21,length(occurred_at)-26) NOT GLOB '*[^0-9]*')))),
-  staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (staff_id IS NULL OR (typeof(staff_id)='integer' AND staff_id>0))
+  staff_id INTEGER REFERENCES staff(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED CHECK (staff_id IS NULL OR (typeof(staff_id)='integer' AND staff_id>0)),
+  client_id INTEGER REFERENCES clients(id) ON DELETE RESTRICT,
+  CHECK ((staff_id IS NOT NULL AND client_id IS NULL) OR (staff_id IS NULL AND client_id IS NOT NULL))
 );
 
 -- Служебные метаданные снимка; не являются пятнадцатой предметной сущностью.
@@ -246,7 +257,7 @@ CREATE TRIGGER payment_insert BEFORE INSERT ON payments BEGIN
 END;
 
 CREATE TRIGGER log_insert BEFORE INSERT ON action_log BEGIN
- SELECT RAISE(ABORT,'Не найден объект журнала') WHERE NOT ((NEW.entity_type='roles' AND EXISTS(SELECT 1 FROM roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff' AND EXISTS(SELECT 1 FROM staff WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff_roles' AND EXISTS(SELECT 1 FROM staff_roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='clients' AND EXISTS(SELECT 1 FROM clients WHERE id=NEW.entity_id)) OR (NEW.entity_type='zones' AND EXISTS(SELECT 1 FROM zones WHERE id=NEW.entity_id)) OR (NEW.entity_type='categories' AND EXISTS(SELECT 1 FROM categories WHERE id=NEW.entity_id)) OR (NEW.entity_type='workplaces' AND EXISTS(SELECT 1 FROM workplaces WHERE id=NEW.entity_id)) OR (NEW.entity_type='tariffs' AND EXISTS(SELECT 1 FROM tariffs WHERE id=NEW.entity_id)) OR (NEW.entity_type='bookings' AND EXISTS(SELECT 1 FROM bookings WHERE id=NEW.entity_id)) OR (NEW.entity_type='sessions' AND EXISTS(SELECT 1 FROM sessions WHERE id=NEW.entity_id)) OR (NEW.entity_type='payment_methods' AND EXISTS(SELECT 1 FROM payment_methods WHERE id=NEW.entity_id)) OR (NEW.entity_type='payments' AND EXISTS(SELECT 1 FROM payments WHERE id=NEW.entity_id)) OR (NEW.entity_type='faults' AND EXISTS(SELECT 1 FROM faults WHERE id=NEW.entity_id)) OR (NEW.entity_type='action_log' AND EXISTS(SELECT 1 FROM action_log WHERE id=NEW.entity_id)));
+ SELECT RAISE(ABORT,'Не найден объект журнала') WHERE NOT ((NEW.entity_type='roles' AND EXISTS(SELECT 1 FROM roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff' AND EXISTS(SELECT 1 FROM staff WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff_roles' AND EXISTS(SELECT 1 FROM staff_roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='clients' AND EXISTS(SELECT 1 FROM clients WHERE id=NEW.entity_id)) OR (NEW.entity_type='zones' AND EXISTS(SELECT 1 FROM zones WHERE id=NEW.entity_id)) OR (NEW.entity_type='categories' AND EXISTS(SELECT 1 FROM categories WHERE id=NEW.entity_id)) OR (NEW.entity_type='workplaces' AND EXISTS(SELECT 1 FROM workplaces WHERE id=NEW.entity_id)) OR (NEW.entity_type='tariffs' AND EXISTS(SELECT 1 FROM tariffs WHERE id=NEW.entity_id)) OR (NEW.entity_type='bookings' AND EXISTS(SELECT 1 FROM bookings WHERE id=NEW.entity_id)) OR (NEW.entity_type='sessions' AND EXISTS(SELECT 1 FROM sessions WHERE id=NEW.entity_id)) OR (NEW.entity_type='payment_methods' AND EXISTS(SELECT 1 FROM payment_methods WHERE id=NEW.entity_id)) OR (NEW.entity_type='payments' AND EXISTS(SELECT 1 FROM payments WHERE id=NEW.entity_id)) OR (NEW.entity_type='faults' AND EXISTS(SELECT 1 FROM faults WHERE id=NEW.entity_id)) OR (NEW.entity_type='client_accounts' AND EXISTS(SELECT 1 FROM client_accounts WHERE id=NEW.entity_id)) OR (NEW.entity_type='action_log' AND EXISTS(SELECT 1 FROM action_log WHERE id=NEW.entity_id)));
  SELECT RAISE(ABORT,'Перенос требует причины и прежних/новых значений') WHERE NEW.action='move' AND (length(trim(coalesce(NEW.reason,'')))=0 OR NEW.old_values='{}' OR NEW.new_values='{}' OR NEW.entity_type!='bookings');
 END;
 
@@ -283,7 +294,7 @@ CREATE TRIGGER payment_update BEFORE UPDATE ON payments BEGIN
 END;
 
 CREATE TRIGGER log_update BEFORE UPDATE ON action_log BEGIN
- SELECT RAISE(ABORT,'Не найден объект журнала') WHERE NOT ((NEW.entity_type='roles' AND EXISTS(SELECT 1 FROM roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff' AND EXISTS(SELECT 1 FROM staff WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff_roles' AND EXISTS(SELECT 1 FROM staff_roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='clients' AND EXISTS(SELECT 1 FROM clients WHERE id=NEW.entity_id)) OR (NEW.entity_type='zones' AND EXISTS(SELECT 1 FROM zones WHERE id=NEW.entity_id)) OR (NEW.entity_type='categories' AND EXISTS(SELECT 1 FROM categories WHERE id=NEW.entity_id)) OR (NEW.entity_type='workplaces' AND EXISTS(SELECT 1 FROM workplaces WHERE id=NEW.entity_id)) OR (NEW.entity_type='tariffs' AND EXISTS(SELECT 1 FROM tariffs WHERE id=NEW.entity_id)) OR (NEW.entity_type='bookings' AND EXISTS(SELECT 1 FROM bookings WHERE id=NEW.entity_id)) OR (NEW.entity_type='sessions' AND EXISTS(SELECT 1 FROM sessions WHERE id=NEW.entity_id)) OR (NEW.entity_type='payment_methods' AND EXISTS(SELECT 1 FROM payment_methods WHERE id=NEW.entity_id)) OR (NEW.entity_type='payments' AND EXISTS(SELECT 1 FROM payments WHERE id=NEW.entity_id)) OR (NEW.entity_type='faults' AND EXISTS(SELECT 1 FROM faults WHERE id=NEW.entity_id)) OR (NEW.entity_type='action_log' AND EXISTS(SELECT 1 FROM action_log WHERE id=NEW.entity_id)));
+ SELECT RAISE(ABORT,'Не найден объект журнала') WHERE NOT ((NEW.entity_type='roles' AND EXISTS(SELECT 1 FROM roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff' AND EXISTS(SELECT 1 FROM staff WHERE id=NEW.entity_id)) OR (NEW.entity_type='staff_roles' AND EXISTS(SELECT 1 FROM staff_roles WHERE id=NEW.entity_id)) OR (NEW.entity_type='clients' AND EXISTS(SELECT 1 FROM clients WHERE id=NEW.entity_id)) OR (NEW.entity_type='zones' AND EXISTS(SELECT 1 FROM zones WHERE id=NEW.entity_id)) OR (NEW.entity_type='categories' AND EXISTS(SELECT 1 FROM categories WHERE id=NEW.entity_id)) OR (NEW.entity_type='workplaces' AND EXISTS(SELECT 1 FROM workplaces WHERE id=NEW.entity_id)) OR (NEW.entity_type='tariffs' AND EXISTS(SELECT 1 FROM tariffs WHERE id=NEW.entity_id)) OR (NEW.entity_type='bookings' AND EXISTS(SELECT 1 FROM bookings WHERE id=NEW.entity_id)) OR (NEW.entity_type='sessions' AND EXISTS(SELECT 1 FROM sessions WHERE id=NEW.entity_id)) OR (NEW.entity_type='payment_methods' AND EXISTS(SELECT 1 FROM payment_methods WHERE id=NEW.entity_id)) OR (NEW.entity_type='payments' AND EXISTS(SELECT 1 FROM payments WHERE id=NEW.entity_id)) OR (NEW.entity_type='faults' AND EXISTS(SELECT 1 FROM faults WHERE id=NEW.entity_id)) OR (NEW.entity_type='client_accounts' AND EXISTS(SELECT 1 FROM client_accounts WHERE id=NEW.entity_id)) OR (NEW.entity_type='action_log' AND EXISTS(SELECT 1 FROM action_log WHERE id=NEW.entity_id)));
  SELECT RAISE(ABORT,'Перенос требует причины и прежних/новых значений') WHERE NEW.action='move' AND (length(trim(coalesce(NEW.reason,'')))=0 OR NEW.old_values='{}' OR NEW.new_values='{}' OR NEW.entity_type!='bookings');
 END;
 

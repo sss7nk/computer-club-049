@@ -1,3 +1,4 @@
+import {CLIENT_MIGRATION} from './client-migration.mjs';
 import http from 'node:http';
 import {readFileSync,existsSync,mkdirSync,readdirSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
@@ -16,6 +17,7 @@ const db=openDatabase(process.env.CLUB_DATABASE||path.join(runtime,'club.sqlite'
 if(!db.raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get()){
   db.raw.exec(readFileSync(path.join(root,'db/schema.sql'),'utf8'));db.raw.exec(readFileSync(path.join(root,'db/web.sql'),'utf8'));
 }
+if(!db.raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='client_accounts'").get())db.raw.exec('BEGIN;'+CLIENT_MIGRATION+'COMMIT;');
 await ensureSeed(db);
 const files={'/':['index.html','text/html; charset=utf-8'],'/index.html':['index.html','text/html; charset=utf-8'],'/app.js':['app.js','text/javascript; charset=utf-8'],'/styles.css':['styles.css','text/css; charset=utf-8']};
 files['/gaming.css']=['gaming.css','text/css; charset=utf-8'];

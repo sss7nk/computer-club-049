@@ -1,6 +1,7 @@
 import {SCHEMA,TABLES,SEED} from './course-schema.mjs';
 import {AppError,requireValue,text,id,timestamp,nowISO,cost,cents,deadline,overlap,permission,has,makeReport,csv,roleNames} from './domain.mjs';
 import {digest,randomHex,hashPassword,verifyPassword,equal,cookie,cookieHeader} from './security.mjs';
+import {clientAuth,clientRegister,clientLogin,clientBootstrap,clientRoute} from './client-api.mjs';
 
 const json=(data,status=200,headers={})=>Response.json(data,{status,headers:{'cache-control':'no-store',...headers}});
 const all=async(db,sql,...args)=>(await db.prepare(sql).bind(...args).all()).results;
@@ -10,7 +11,7 @@ const next=async(db,table)=>Number((await one(db,`SELECT coalesce(max(id),0)+1 A
 const stmt=(db,sql,...args)=>db.prepare(sql).bind(...args);
 function insert(db,table,row){const keys=Object.keys(row);return stmt(db,`INSERT INTO ${table} (${keys.join(',')}) VALUES (${keys.map(()=>'?').join(',')})`,...Object.values(row).map(v=>typeof v==='boolean'?+v:typeof v==='object'&&v!==null?JSON.stringify(v):v));}
 function update(db,table,row,key){const keys=Object.keys(row);return stmt(db,`UPDATE ${table} SET ${keys.map(k=>k+'=?').join(',')} WHERE id=?`,...Object.values(row).map(v=>typeof v==='boolean'?+v:v),key);}
-const publicUser=u=>({id:u.id,full_name:u.full_name,login:u.login,roles:u.roles,csrf_token:u.csrf_token});
+const publicUser=u=>({id:u.id,client_id:u.client_id||null,account_type:u.account_type||'staff',full_name:u.full_name,login:u.login,roles:u.roles,csrf_token:u.csrf_token});
 
 export async function ensureSeed(db){
   if(await one(db,'SELECT id FROM meta WHERE id=1'))return;
@@ -22,7 +23,7 @@ async function auth(db,request,now){
   const row=await one(db,`SELECT s.id,s.full_name,s.login,a.csrf_token,a.expires_at,group_concat(r.code) AS role_codes
     FROM app_sessions a JOIN staff s ON s.id=a.staff_id JOIN staff_roles sr ON sr.staff_id=s.id JOIN roles r ON r.id=sr.role_id
     WHERE a.token_hash=? AND s.active=1 AND a.expires_at>? GROUP BY s.id`,hash,now);
-  return row?{...row,roles:row.role_codes.split(','),token_hash:hash}:null;
+  return row?{...row,roles:row.role_codes.split(','),token_hash:hash}:clientAuth(db,request,now);
 }
 function sameOrigin(request){const origin=request.headers.get('origin');requireValue(origin===new URL(request.url).origin,'Запрос с другого сайта запрещён',403);requireValue(request.headers.get('content-type')?.split(';')[0]==='application/json','Требуется JSON',415);}
 async function readBody(request){const body=await request.text();requireValue(body.length<=65536,'Слишком большой запрос',413);try{const value=JSON.parse(body);requireValue(value&&typeof value==='object'&&!Array.isArray(value),'Требуется объект JSON');return value;}catch(e){if(e instanceof AppError)throw e;throw new AppError(400,'Некорректный JSON');}}
@@ -67,7 +68,7 @@ async function bootstrap(db,user,now){
   }
   if(can('manager','admin','cashier','accountant')){data.payments=await all(db,'SELECT p.*,m.name AS method_name,w.number AS workplace_number FROM payments p JOIN payment_methods m ON m.id=p.method_id JOIN sessions s ON s.id=p.session_id JOIN workplaces w ON w.id=s.workplace_id ORDER BY p.paid_at DESC');data.payment_methods=await all(db,'SELECT * FROM payment_methods ORDER BY id');}
   if(can('manager','admin','technician','accountant'))data.faults=await all(db,'SELECT f.*,w.number AS workplace_number FROM faults f JOIN workplaces w ON w.id=f.workplace_id ORDER BY f.detected_at DESC');
-  if(can('manager')){data.staff=await all(db,'SELECT s.id,s.full_name,s.login,s.active,group_concat(r.code) AS role_codes FROM staff s LEFT JOIN staff_roles sr ON sr.staff_id=s.id LEFT JOIN roles r ON r.id=sr.role_id GROUP BY s.id ORDER BY s.id');data.roles=await all(db,'SELECT * FROM roles');data.action_log=await all(db,'SELECT a.*,s.full_name AS staff_name FROM action_log a JOIN staff s ON s.id=a.staff_id ORDER BY a.id DESC LIMIT 100');}
+  if(can('manager')){data.staff=await all(db,'SELECT s.id,s.full_name,s.login,s.active,group_concat(r.code) AS role_codes FROM staff s LEFT JOIN staff_roles sr ON sr.staff_id=s.id LEFT JOIN roles r ON r.id=sr.role_id GROUP BY s.id ORDER BY s.id');data.roles=await all(db,'SELECT * FROM roles');data.action_log=await all(db,`SELECT a.*,coalesce(s.full_name,'Клиент: '||c.full_name) AS staff_name FROM action_log a LEFT JOIN staff s ON s.id=a.staff_id LEFT JOIN clients c ON c.id=a.client_id ORDER BY a.id DESC LIMIT 100`);}
   return {user:publicUser(user),now,data,role_names:roleNames};
 }
 
@@ -75,12 +76,14 @@ export async function api(request,env){
   const db=env.DB,now=nowISO(env),url=new URL(request.url),path=url.pathname,method=request.method;
   try{
     requireValue(db,'База данных не подключена',503);await ensureSeed(db);
-    if(path==='/api/health')return json({ok:true,storage:'SQLite / D1',domain_tables:14});
+    if(path==='/api/health')return json({ok:true,storage:'SQLite / D1',domain_tables:15});
     if(path==='/api/public'&&method==='GET')return json({now,workplaces:await all(db,'SELECT w.number,z.name AS zone_name,c.name AS category_name FROM workplaces w JOIN zones z ON z.id=w.zone_id JOIN categories c ON c.id=w.category_id ORDER BY w.number'),tariffs:await all(db,'SELECT t.*,c.name AS category_name FROM tariffs t JOIN categories c ON c.id=t.category_id WHERE t.active=1 ORDER BY t.id')});
     const user=await auth(db,request,now);
     if(path==='/api/auth/me'&&method==='GET')return user?json({user:publicUser(user)}):json({user:null});
     if(method!=='GET'){sameOrigin(request);}
     const body=method==='POST'?await readBody(request):{};
+    if(path==='/api/auth/register'&&method==='POST')return await clientRegister(db,body,request,env,now,user);
+    if(path==='/api/auth/login'&&method==='POST'&&body.account_type==='client')return await clientLogin(db,body,request,env,now,user);
     if(path==='/api/auth/login'&&method==='POST'){
       requireValue(!user,'Вы уже вошли. Сначала выйдите из текущей учётной записи.',409);
       const login=text(body.login,'Логин',1,64).toLowerCase(),password=typeof body.password==='string'?body.password:'';requireValue(password.length>0&&password.length<=128,'Введите пароль');
@@ -98,8 +101,10 @@ export async function api(request,env){
       return json({user:{id:staff.id,full_name:staff.full_name,login:staff.login,roles,csrf_token:csrf}},200,{'set-cookie':cookieHeader(request,token)});
     }
     requireValue(user,'Войдите в учётную запись',401);
-    if(path==='/api/bootstrap'&&method==='GET')return json(await bootstrap(db,user,now));
-    if(path==='/api/auth/logout'&&method==='POST'){requireValue(equal(request.headers.get('x-csrf-token'),user.csrf_token),'Недействительный защитный токен',403);await run(db,'DELETE FROM app_sessions WHERE token_hash=?',user.token_hash);return json({ok:true},200,{'set-cookie':cookieHeader(request,'',0)});}
+    if(path==='/api/bootstrap'&&method==='GET')return json(user.roles.includes('client')?await clientBootstrap(db,user,now):await bootstrap(db,user,now));
+    if(path==='/api/auth/logout'&&method==='POST'){requireValue(equal(request.headers.get('x-csrf-token'),user.csrf_token),'Недействительный защитный токен',403);await db.batch([stmt(db,'DELETE FROM app_sessions WHERE token_hash=?',user.token_hash),stmt(db,'DELETE FROM app_client_sessions WHERE token_hash=?',user.token_hash)]);return json({ok:true},200,{'set-cookie':cookieHeader(request,'',0)});}
+    if(path.startsWith('/api/client/'))return await clientRoute(db,user,request,body,now);
+    requireValue(!user.roles.includes('client'),'Этот раздел доступен сотрудникам',403);
     if(path.startsWith('/api/reports/')&&method==='GET'){
       const name=path.split('/').pop();if(name==='revenue')permission(user,'manager','admin','cashier','accountant');else permission(user,'manager','admin');
       const report=makeReport(await loadDomain(db),name,url.searchParams.get('from'),url.searchParams.get('to'));
@@ -187,7 +192,7 @@ export async function api(request,env){
     if(error instanceof AppError)return json({error:error.message,fields:error.fields},error.status);
     const message=String(error?.message||error);
     if(/app_assertion|ok=1|ok = 1/.test(message))return json({error:'Данные или права изменились. Обновите страницу и повторите операцию.'},409);
-    if(/UNIQUE constraint failed/.test(message)){const label=/staff.login/.test(message)?'Логин уже занят':/clients.phone/.test(message)?'Этот телефон уже есть у другого клиента':'Запись уже существует';return json({error:label},409);}
+    if(/UNIQUE constraint failed/.test(message)){const label=/staff.login|client_accounts.login/.test(message)?'Логин уже занят':/clients.phone/.test(message)?'Этот телефон уже есть у другого клиента':'Запись уже существует';return json({error:label},409);}
     if(/constraint|Нельзя|Нужна|Пересечение|Слишком|Бронь|тариф|Тариф|сеанс|Сеанс|неисправ|История|Место|Журнал|Перенос|активн/.test(message))return json({error:'Операция отклонена: '+message.replace(/^.*?(?:D1_ERROR:|SQLITE_CONSTRAINT[^:]*:)\s*/,'').slice(0,250)},409);
     console.error('API failure',message);return json({error:'Не удалось выполнить операцию. Повторите запрос.'},500);
   }
